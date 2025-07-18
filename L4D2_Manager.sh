@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =================================================================
-# L4D2 服务器与插件管理器 2407 (Linux 移植版)
-# 作者: Q1en
+# L4D2 服务器与插件管理器 2607 - Polaris
+# 作者: Q1en, 20Cat
 # 功能: 部署/更新L4D2服务器, 安装/更新 SourceMod & MetaMod, 并管理插件、服务器实例。
 # =================================================================
 
@@ -52,15 +52,15 @@ SteamLoginUser=""
 
 
 # --- 脚本变量定义 ---
-L4d2Dir="$ServerRoot/left4dead2" # L4D2游戏内容目录
+L4d2Dir="$ServerRoot/left4dead2"
 ScriptDir="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 InstallerDir="$ScriptDir/SourceMod_Installers"
 PluginSourceDir="$ScriptDir/Available_Plugins"
 ReceiptsDir="$ScriptDir/Installed_Receipts"
-declare -A RunningProcesses # 用于存储正在运行的服务器进程信息 [InstanceName]="PID|Port"
-ScriptVersion="2407"
+declare -A RunningProcesses # [InstanceName]="session_name|Port"
+ScriptVersion="2607 - Polaris"
 IsSourceModInstalled=false
-CronJobPrefix="L4D2Manager" # Cron定时任务的注释前缀
+CronJobPrefix="L4D2Manager"
 
 # --- 颜色定义 ---
 C_RESET='\e[0m'
@@ -72,7 +72,6 @@ C_WHITE_BG='\e[47m'
 C_BLACK_FG='\e[30m'
 
 # --- 初始化检查 ---
-# 使用更可靠的方式检查SourceMod安装状态
 if [ -d "$L4d2Dir/addons/sourcemod" ]; then
     IsSourceModInstalled=true
 fi
@@ -88,10 +87,9 @@ mkdir -p "$InstallerDir" "$PluginSourceDir" "$ReceiptsDir"
 
 
 # --- 交互式菜单核心函数 ---
-# $1: Title, $2: Array of items, $3: Single/Multi, $4: Confirm Key Char, $5: Confirm Key Name
 function Show-InteractiveMenu {
     local title="$1"
-    local -n items=$2 # Pass array by reference
+    local -n items=$2
     local selection_mode="$3"
     local confirm_key_char="$4"
     local confirm_key_name="$5"
@@ -99,7 +97,6 @@ function Show-InteractiveMenu {
     local current_index=0
     local -a selected_indices=()
 
-    # Helper to check if an index is selected
     is_selected() {
         for sel_idx in "${selected_indices[@]}"; do
             if [[ $sel_idx -eq $1 ]]; then return 0; fi
@@ -108,9 +105,6 @@ function Show-InteractiveMenu {
     }
 
     while true; do
-        # --- FIXED ---
-        # All visual output is now redirected to stderr (>&2) to not pollute stdout,
-        # which is used by command substitution to get the return value.
         clear >&2
         echo -e "${C_YELLOW}$title${C_RESET}\n" >&2
         for i in "${!items[@]}"; do
@@ -144,19 +138,18 @@ function Show-InteractiveMenu {
         echo "-----------------------------------------------------------------" >&2
 
         IFS= read -rsn1 key
-        # Arrow keys are multi-byte sequences
         if [[ "$key" == $'\x1b' ]]; then
             read -rsn2 -t 0.1 key
         fi
 
         case "$key" in
-            '[A') # Up arrow
+            '[A')
                 current_index=$(( (current_index - 1 + ${#items[@]}) % ${#items[@]} ))
                 ;;
-            '[B') # Down arrow
+            '[B')
                 current_index=$(( (current_index + 1) % ${#items[@]} ))
                 ;;
-            ' ') # Spacebar for multi-selection
+            ' ')
                 if [[ "$selection_mode" == "multi" ]]; then
                     if is_selected "$current_index"; then
                         local new_selected=()
@@ -169,7 +162,7 @@ function Show-InteractiveMenu {
                     fi
                 fi
                 ;;
-            'a'|'A') # 'A' for select/deselect all
+            'a'|'A')
                  if [[ "$selection_mode" == "multi" ]]; then
                     if [[ ${#selected_indices[@]} -lt ${#items[@]} ]]; then
                         selected_indices=()
@@ -179,11 +172,10 @@ function Show-InteractiveMenu {
                     fi
                  fi
                 ;;
-            'q'|'Q') # Quit
+            'q'|'Q')
                 return 1 
                 ;;
-            ''|$'\n'|"$confirm_key_char") # Enter or Confirm Key
-                # This part correctly writes to stdout to be captured.
+            ''|$'\n'|"$confirm_key_char")
                 if [[ "$selection_mode" == "single" ]]; then
                     echo "${items[$current_index]}"
                     return 0
@@ -207,14 +199,11 @@ function Invoke-PluginInstallation {
     echo -e "\n--- 开始安装 '$pluginName' ---"
     
     echo " > 正在创建文件清单..."
-    # Create file list relative to the plugin directory
     (cd "$pluginPath" && find . -type f | sed 's|^\./||') > "$receiptPath"
     
     echo " > 正在将文件复制到服务器目录..."
-    # rsync is great for this, preserving structure
     rsync -a "$pluginPath/" "$ServerRoot/"
     
-    # Check rsync exit code
     if [ $? -eq 0 ]; then
         rm -rf "$pluginPath"
         echo -e "   ${C_GREEN}成功! 插件 '$pluginName' 已安装。${C_RESET}"
@@ -231,7 +220,6 @@ function Invoke-PluginUninstallation {
     local pluginReclaimFolder="$PluginSourceDir/$pluginName"
     mkdir -p "$pluginReclaimFolder"
     
-    # Read each file from the receipt and move it
     while IFS= read -r relativePath || [[ -n "$relativePath" ]]; do
         local serverFile="$ServerRoot/$relativePath"
         local destinationFile="$pluginReclaimFolder/$relativePath"
@@ -242,14 +230,12 @@ function Invoke-PluginUninstallation {
         fi
     done < "$receiptPath"
     
-    # Attempt to remove now-empty directories
     while IFS= read -r relativePath || [[ -n "$relativePath" ]]; do
         local dirOnServer="$ServerRoot/$(dirname "$relativePath")"
-        # Check if dir exists and is empty
         if [ -d "$dirOnServer" ] && [ -z "$(ls -A "$dirOnServer")" ]; then
             rmdir "$dirOnServer" 2>/dev/null
         fi
-    done < <(sort -r "$receiptPath") # Process deeper paths first
+    done < <(sort -r "$receiptPath")
 
     rm -f "$receiptPath"
     echo -e " > ${C_GREEN}成功! 插件 '$pluginName' 的所有文件已被移回。${C_RESET}"
@@ -257,18 +243,17 @@ function Invoke-PluginUninstallation {
 
 
 function Update-RunningProcessList {
-    local pids_to_remove=()
+    local instances_to_remove=()
     for instance_name in "${!RunningProcesses[@]}"; do
-        local pid=$(echo "${RunningProcesses[$instance_name]}" | cut -d'|' -f1)
-        # Check if process with PID exists
-        if ! ps -p "$pid" > /dev/null; then
-            pids_to_remove+=("$instance_name")
+        local session_name=$(echo "${RunningProcesses[$instance_name]}" | cut -d'|' -f1)
+        if ! screen -ls | grep -q "\.$session_name"; then
+            instances_to_remove+=("$instance_name")
         fi
     done
 
-    if [ ${#pids_to_remove[@]} -gt 0 ]; then
-        echo -e "\n\n${C_YELLOW}检测到有 ${#pids_to_remove[@]} 个实例已在外部关闭，正在更新列表...${C_RESET}"
-        for name in "${pids_to_remove[@]}"; do
+    if [ ${#instances_to_remove[@]} -gt 0 ]; then
+        echo -e "\n\n${C_YELLOW}检测到有 ${#instances_to_remove[@]} 个实例已在外部关闭，正在更新列表...${C_RESET}"
+        for name in "${instances_to_remove[@]}"; do
             unset RunningProcesses["$name"]
         done
         sleep 1
@@ -348,11 +333,12 @@ function Manage-ServerInstances {
             echo "  (无)"
         else
             for name in "${!RunningProcesses[@]}"; do
-                local pid=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f1)
+                local session_name=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f1)
                 local port=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f2)
-                echo -e "  - ${C_GREEN}$name (端口: $port, PID: $pid)${C_RESET}"
+                echo -e "  - ${C_GREEN}$name (端口: $port, 会话: $session_name)${C_RESET}"
             done
         fi
+        echo -e "\n${C_CYAN}提示: 您可以使用 \`screen -r <会话名>\` 来连接到服务器后台。${C_RESET}"
         echo -e "\n请选择操作:"
         echo "  1. 启动一个新的服务器实例"
         echo "  2. 关闭一个正在运行的实例"
@@ -371,14 +357,20 @@ function Manage-ServerInstances {
 }
 
 function Start-L4D2ServerInstance {
-    local srcds_path="$ServerRoot/srcds_run"
-    if [ ! -f "$srcds_path" ]; then 
+    if ! command -v screen &> /dev/null; then
+        echo -e "\n${C_RED}错误: 未找到 'screen' 命令。${C_RESET}"
+        echo "请先安装 screen (例如: sudo apt-get install screen) 然后再试。"
+        read -p "按回车键返回..."; return
+    fi
+
+    local srcds_path="./srcds_run"
+    if [ ! -f "$ServerRoot/$srcds_path" ]; then 
         echo -e "\n${C_RED}错误: 找不到 srcds_run。请先部署服务器。${C_RESET}"; read -p "按回车键返回..."; return 
     fi
 
     local -a instanceOptions
     for name in "${!ServerInstances[@]}"; do
-        eval "${ServerInstances[$name]}" # Load variables Port, etc.
+        eval "${ServerInstances[$name]}"
         instanceOptions+=("$name (端口: $Port)")
     done
     instanceOptions+=("手动配置新实例")
@@ -402,27 +394,32 @@ function Start-L4D2ServerInstance {
         Name="$instanceName"
     fi
 
-    # Check if port is in use by a managed process
-    for val in "${RunningProcesses[@]}"; do
-        local running_port=$(echo "$val" | cut -d'|' -f2)
-        if [[ "$running_port" == "$Port" ]]; then
-            echo -e "\n${C_RED}错误: 端口 $Port 已被占用。${C_RESET}"; read -p "按回车键返回..."; return
-        fi
-    done
+    local session_name="l4d2_manager_${Name}"
+    if screen -ls | grep -q "\.$session_name"; then
+        echo -e "\n${C_RED}错误: 名为 '$session_name' 的 screen 会话已在运行。${C_RESET}"
+        read -p "按回车键返回..."; return
+    fi
 
-    local launchArgs="-console -game left4dead2 -insecure +sv_lan 0 +ip 0.0.0.0 -port $Port +maxplayers $MaxPlayers +map $StartMap +hostname \"$HostName\" $ExtraParams"
-    echo -e "\n${C_CYAN}即将使用以下参数启动服务器:${C_RESET}"
-    echo " $srcds_path $launchArgs"
+    local -a launchArgsArray=(
+        "$srcds_path" -console -game left4dead2 -insecure +sv_lan 0 +ip 0.0.0.0
+        -port "$Port" +maxplayers "$MaxPlayers" +map "$StartMap" +hostname "$HostName"
+    )
+    read -r -a extraArgs <<< "$ExtraParams"
+    launchArgsArray+=("${extraArgs[@]}")
+
+    echo -e "\n${C_CYAN}即将在 Screen 会话 '$session_name' 中启动服务器:${C_RESET}"
+    printf " %q" "${launchArgsArray[@]}"
+    echo
     
-    # Use nohup to detach the process, run in the server's root directory
-    (cd "$ServerRoot" && nohup ./srcds_run $launchArgs >/dev/null 2>&1 &)
-    local pid=$!
+    (cd "$ServerRoot" && screen -dmS "$session_name" "${launchArgsArray[@]}")
     
-    if kill -0 $pid 2>/dev/null; then
-        RunningProcesses["$Name"]="$pid|$Port"
-        echo -e "\n${C_GREEN}服务器实例 '$Name' 已成功启动! (PID: $pid)${C_RESET}"
+    sleep 1
+
+    if screen -ls | grep -q "\.$session_name"; then
+        RunningProcesses["$Name"]="$session_name|$Port"
+        echo -e "\n${C_GREEN}服务器实例 '$Name' 已在 screen 会话 '$session_name' 中成功启动!${C_RESET}"
     else
-        echo -e "\n${C_RED}启动服务器失败。${C_RESET}"
+        echo -e "\n${C_RED}启动服务器失败。请检查 screen 是否能正常工作。${C_RESET}"
     fi
     read -p "按回车键返回..."
 }
@@ -434,8 +431,8 @@ function Stop-L4D2ServerInstance {
     
     local -a runningNames
     for name in "${!RunningProcesses[@]}"; do
-        local pid=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f1)
-        runningNames+=("$name (PID: $pid)")
+        local session_name=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f1)
+        runningNames+=("$name (会话: $session_name)")
     done
 
     local selected_str
@@ -443,24 +440,33 @@ function Stop-L4D2ServerInstance {
     if [ -z "$selected_str" ]; then return; fi
     
     local instanceNameToStop=$(echo "$selected_str" | awk '{print $1}')
-    local pidToStop=$(echo "${RunningProcesses[$instanceNameToStop]}" | cut -d'|' -f1)
+    local sessionToStop=$(echo "${RunningProcesses[$instanceNameToStop]}" | cut -d'|' -f1)
 
-    echo -n "正在尝试关闭实例 '$instanceNameToStop' (PID: $pidToStop)..."
-    kill -9 "$pidToStop" >/dev/null 2>&1
+    echo -n "正在向会话 '$sessionToStop' 发送 quit 指令..."
+    screen -S "$sessionToStop" -X stuff $'quit\n'
+    
     if [ $? -eq 0 ]; then
-        echo -e "${C_GREEN}进程已成功关闭。${C_RESET}"
+        echo -e "${C_GREEN}指令已发送。服务器将优雅关闭。${C_RESET}"
+        unset RunningProcesses["$instanceNameToStop"]
     else
-        echo -e "${C_RED}关闭进程失败，可能已被手动关闭。${C_RESET}"
+        echo -e "${C_RED}发送指令失败。该会话可能已被手动关闭。${C_RESET}"
+        unset RunningProcesses["$instanceNameToStop"]
     fi
-    unset RunningProcesses["$instanceNameToStop"]
     read -p "按回车键返回..."
 }
 
+# --- 定时任务管理 (已更新) ---
 function Manage-ScheduledTasks {
+    if ! command -v screen &> /dev/null; then
+        echo -e "\n${C_RED}错误: 定时任务功能依赖 'screen'。${C_RESET}"
+        echo "请先安装 screen (例如: sudo apt-get install screen) 然后再试。"
+        read -p "按回车键返回..."; return
+    fi
+
     while true; do
         clear
         echo -e "${C_YELLOW}==================== 服务器定时任务管理 (Cron) ====================${C_RESET}"
-        echo -e "\n此功能允许您创建、查看和删除服务器的定时任务 (cron jobs)。"
+        echo -e "\n此功能会修改您当前用户的 crontab 来实现定时启停。"
         echo -e "${C_CYAN}状态说明: [服务状态] - 任务注释 | 触发时间${C_RESET}"
         echo -e "\n现有任务:"
         
@@ -470,14 +476,12 @@ function Manage-ScheduledTasks {
         if [ -n "$existing_tasks" ]; then
             while IFS= read -r task; do
                 local comment=$(echo "$task" | sed "s/.*# //")
-                local type=$(echo "$comment" | cut -d'_' -f2)
                 local name=$(echo "$comment" | cut -d'_' -f3)
-                local port=$(echo "$comment" | cut -d'_' -f4 | sed 's/Port//')
-                local time_spec=$(echo "$task" | awk '{print $2 ":" $1}') # H:M
+                local session_name="l4d2_manager_${name}"
+                local time_spec=$(echo "$task" | awk '{print $2 ":" $1}')
 
-                # Check process status
                 local status_text status_color
-                if pgrep -f "srcds_run.*-port $port" > /dev/null; then
+                if screen -ls | grep -q "\.$session_name"; then
                     status_text="运行中"
                     status_color=$C_CYAN
                 else
@@ -508,7 +512,6 @@ function Manage-ScheduledTasks {
     done
 }
 
-
 function New-ServerScheduledTask {
     local actionType="$1"
     local actionTypeDisplay="启动"
@@ -524,7 +527,7 @@ function New-ServerScheduledTask {
     selectedInstanceName=$(Show-InteractiveMenu "请选择要为其创建定时 [${actionTypeDisplay}] 任务的实例" instanceOptions "single" "c" "选择")
     if [ -z "$selectedInstanceName" ]; then return; fi
 
-    eval "${ServerInstances[$selectedInstanceName]}" # Load Port, etc.
+    eval "${ServerInstances[$selectedInstanceName]}"
 
     local time regex="^([01]?[0-9]|2[0-3]):[0-5][0-9]$"
     while true; do
@@ -536,23 +539,18 @@ function New-ServerScheduledTask {
         fi
     done
 
-    local minute=$(echo "$time" | cut -d: -f2)
-    local hour=$(echo "$time" | cut -d: -f1)
-    # Cron needs leading zeros removed for some implementations, so let's strip them
-    minute=$((10#$minute))
-    hour=$((10#$hour))
-
+    local minute=$((10#$(echo "$time" | cut -d: -f2)))
+    local hour=$((10#$(echo "$time" | cut -d: -f1)))
+    local session_name="l4d2_manager_${selectedInstanceName}"
     local taskComment="$CronJobPrefix_${actionType}_${selectedInstanceName}_Port${Port}"
     local command_to_run
-    
+
     if [[ "$actionType" == "Start" ]]; then
-        local srcdsFullPath="$ServerRoot/srcds_run"
         local srcdsArgs="-console -game left4dead2 -insecure +sv_lan 0 +ip 0.0.0.0 -port $Port +maxplayers $MaxPlayers +map $StartMap +hostname \"$HostName\" $ExtraParams"
-        # The command needs to cd to the right directory
-        command_to_run="cd \"$ServerRoot\" && ./srcds_run $srcdsArgs"
+        # For crontab, we must provide full paths and ensure proper context.
+        command_to_run="cd '$ServerRoot' && /usr/bin/screen -dmS '$session_name' ./srcds_run $srcdsArgs"
     else # Stop
-        # pkill is perfect for this, -f checks the full command line
-        command_to_run="pkill -f \"srcds_run.*-port $Port\""
+        command_to_run="/usr/bin/screen -S '$session_name' -X stuff $'quit\\n'"
     fi
     
     local cron_line="$minute $hour * * * $command_to_run # $taskComment"
@@ -564,14 +562,19 @@ function New-ServerScheduledTask {
     echo "触发时间: 每天 $time"
     echo "----------------------"
     
-    # Remove existing task with the same comment before adding the new one
     local current_crontab
     current_crontab=$(crontab -l 2>/dev/null | grep -v "# $taskComment")
     
-    echo "$current_crontab" > mycron
-    echo "$cron_line" >> mycron
-    crontab mycron
-    rm mycron
+    # Using a temporary file is safer than redirecting directly
+    local temp_cron_file=$(mktemp)
+    echo "$current_crontab" > "$temp_cron_file"
+    # Add a newline if the file is not empty and doesn't end with one
+    if [ -s "$temp_cron_file" ] && [[ $(tail -c 1 "$temp_cron_file") != '' ]]; then
+        echo >> "$temp_cron_file"
+    fi
+    echo "$cron_line" >> "$temp_cron_file"
+    crontab "$temp_cron_file"
+    rm "$temp_cron_file"
     
     echo -e "\n${C_GREEN}成功创建/更新了定时任务 '$taskComment'!${C_RESET}"
     read -p "按回车键返回..."
@@ -583,7 +586,6 @@ function View-DeleteScheduledTasks {
         echo -e "${C_YELLOW}==================== 查看并删除定时任务 ====================${C_RESET}"
         
         local -a taskDisplayList
-        # Read tasks into an array
         while IFS= read -r task; do
             if [[ -n "$task" ]]; then
                 local comment=$(echo "$task" | sed "s/.*# //")
@@ -612,14 +614,12 @@ function View-DeleteScheduledTasks {
         for item in "${selectedToDelete[@]}"; do
             local taskCommentToDelete=$(echo "$item" | cut -d'|' -f1 | sed 's/ *$//g')
             echo -n "正在删除任务: '$taskCommentToDelete'..."
-            # Use grep -v to filter out the line with the matching comment
             crontab_content=$(echo "$crontab_content" | grep -v "# $taskCommentToDelete")
             echo -e "${C_GREEN}  成功!${C_RESET}"
         done
         
-        # Install the new, filtered crontab
         if [[ -z "$crontab_content" ]]; then
-            crontab -r # Remove crontab if it's empty
+            crontab -r
         else
             echo "$crontab_content" | crontab -
         fi
@@ -645,7 +645,6 @@ function Install-SourceModAndMetaMod {
     echo -e "2. 将下载的 .tar.gz 文件放入以下目录: \n   $InstallerDir"
     read -p $'\n准备就绪后，按回车键开始安装...' ; echo ""
 
-    # Note: Use -maxdepth 1 to avoid searching in subdirs. Sort to get latest version.
     local metamod_tar=$(find "$InstallerDir" -maxdepth 1 -name "mmsource-*.tar.gz" | sort -V | tail -n 1)
     if [ -n "$metamod_tar" ]; then
         echo "发现 MetaMod 安装包: $(basename "$metamod_tar")"
@@ -697,7 +696,6 @@ function Install-L4D2Plugin {
     
     local -a availablePlugins
     for d in "$PluginSourceDir"/*/; do
-        # Check if it's a directory
         [ -d "$d" ] || continue
         local dirname=$(basename "$d")
         if [ ! -f "$ReceiptsDir/$dirname.receipt" ]; then
@@ -730,7 +728,6 @@ function Uninstall-L4D2Plugin {
     
     local -a installedPlugins
     for f in "$ReceiptsDir"/*.receipt; do
-        # Check if file exists to prevent issues with empty dir
         [ -e "$f" ] || continue
         installedPlugins+=("$(basename "$f" .receipt)")
     done
@@ -762,8 +759,6 @@ function Show-Menu {
     echo ""
     echo " 服务器安装目录: $ServerRoot"
 
-    # --- FIXED ---
-    # Re-added the server installation status check
     if [ -f "$ServerRoot/srcds_run" ]; then
         echo -e " ${C_GREEN}服务器状态: 已部署${C_RESET}"
     else
