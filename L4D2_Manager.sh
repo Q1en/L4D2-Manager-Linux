@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =================================================================
-# L4D2 服务器与插件管理器 2300.P (Linux 移植版)
+# L4D2 服务器与插件管理器 2400.P (Linux 移植版)
 # 作者: Q1en
 # 功能: 部署/更新L4D2服务器, 安装/更新 SourceMod & MetaMod, 并管理插件、服务器实例。
 # =================================================================
@@ -25,7 +25,6 @@ SteamCMDDir="/home/steam/steamcmd"
 #
 # 3. (可选) 预定义服务器实例配置
 #    您可以在这里预设多个服务器的启动参数。
-#    注意: 这是Bash的关联数组语法。
 declare -A ServerInstances=(
     ["主服_战役"]="
         Port=27015
@@ -43,6 +42,12 @@ declare -A ServerInstances=(
     "
 )
 #
+# 4. (可选) 您的 Steam 用户名。
+#    如果在此处填写, 部署服务器时将自动使用此账户。
+#    留空则会在部署时询问您使用匿名还是个人账户登录。
+#    注意: 使用个人账户登录时, SteamCMD 会在下方终端窗口中要求您输入密码和 Steam令牌。
+SteamLoginUser=""
+#
 # #################################################################
 
 
@@ -53,7 +58,7 @@ InstallerDir="$ScriptDir/SourceMod_Installers"
 PluginSourceDir="$ScriptDir/Available_Plugins"
 ReceiptsDir="$ScriptDir/Installed_Receipts"
 declare -A RunningProcesses # 用于存储正在运行的服务器进程信息 [InstanceName]="PID|Port"
-ScriptVersion="2300.P"
+ScriptVersion="2400.P"
 IsSourceModInstalled=false
 CronJobPrefix="L4D2Manager" # Cron定时任务的注释前缀
 
@@ -276,7 +281,6 @@ function Deploy-L4D2Server {
     echo -e "\n此功能将使用 SteamCMD 下载或更新 Left 4 Dead 2 Dedicated Server。"
     echo -e "${C_YELLOW}服务器将被安装到您配置的目录: $ServerRoot${C_RESET}"
     echo -e "将使用 SteamCMD 目录: $SteamCMDDir"
-    echo ""
     
     local steamcmd_executable="$SteamCMDDir/steamcmd.sh"
 
@@ -297,10 +301,31 @@ function Deploy-L4D2Server {
 
     mkdir -p "$ServerRoot"
 
+    # --- MODIFIED SECTION for Login ---
+    local login_credential="anonymous"
+    if [[ -n "$SteamLoginUser" ]]; then
+        login_credential="$SteamLoginUser"
+        echo -e "\n${C_CYAN}将使用预设的Steam账户 '$login_credential' 进行登录。${C_RESET}"
+    else
+        read -p $'\n您希望使用匿名(anonymous)账户还是个人账户登录? (a/p): ' login_choice
+        if [[ "$login_choice" == "p" || "$login_choice" == "P" ]]; then
+            read -p "请输入您的Steam用户名: " temp_user
+            if [[ -n "$temp_user" ]]; then
+                login_credential="$temp_user"
+            fi
+        fi
+    fi
+
+    echo -e "\n使用登录名: ${C_YELLOW}$login_credential${C_RESET}"
+    if [[ "$login_credential" != "anonymous" ]]; then
+         echo -e "${C_YELLOW}注意: SteamCMD 即将运行。请准备在下方窗口输入您的密码和 Steam 令牌。${C_RESET}"
+    fi
+    # --- END MODIFIED SECTION ---
+
     echo -e "\n准备就绪，即将开始执行 SteamCMD..."
     read -p "按回车键开始部署..."
 
-    "$steamcmd_executable" +force_install_dir "$ServerRoot" +login anonymous +app_update 222860 validate +quit
+    "$steamcmd_executable" +force_install_dir "$ServerRoot" +login "$login_credential" +app_update 222860 validate +quit
     
     if [ $? -eq 0 ]; then
         echo -e "\n${C_GREEN}L4D2 服务器文件部署/更新成功!${C_RESET}"
@@ -372,7 +397,6 @@ function Start-L4D2ServerInstance {
         read -p "请输入其他启动参数 (可留空): " ExtraParams
         Name="手动实例_port$Port"
     else
-        # --- CORRECTED LINE ---
         local instanceName=$(echo "$selected_str" | awk '{print $1}')
         eval "${ServerInstances[$instanceName]}"
         Name="$instanceName"
@@ -418,7 +442,6 @@ function Stop-L4D2ServerInstance {
     selected_str=$(Show-InteractiveMenu "请选择要关闭的服务器实例" runningNames "single" "k" "关闭")
     if [ -z "$selected_str" ]; then return; fi
     
-    # --- CORRECTED LINE ---
     local instanceNameToStop=$(echo "$selected_str" | awk '{print $1}')
     local pidToStop=$(echo "${RunningProcesses[$instanceNameToStop]}" | cut -d'|' -f1)
 
