@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =================================================================
-# L4D2 服务器与插件管理器 2400.P (Linux 移植版)
+# L4D2 服务器与插件管理器 2407 (Linux 移植版)
 # 作者: Q1en
 # 功能: 部署/更新L4D2服务器, 安装/更新 SourceMod & MetaMod, 并管理插件、服务器实例。
 # =================================================================
@@ -58,7 +58,7 @@ InstallerDir="$ScriptDir/SourceMod_Installers"
 PluginSourceDir="$ScriptDir/Available_Plugins"
 ReceiptsDir="$ScriptDir/Installed_Receipts"
 declare -A RunningProcesses # 用于存储正在运行的服务器进程信息 [InstanceName]="PID|Port"
-ScriptVersion="2400.P"
+ScriptVersion="2407"
 IsSourceModInstalled=false
 CronJobPrefix="L4D2Manager" # Cron定时任务的注释前缀
 
@@ -72,15 +72,16 @@ C_WHITE_BG='\e[47m'
 C_BLACK_FG='\e[30m'
 
 # --- 初始化检查 ---
+# 使用更可靠的方式检查SourceMod安装状态
+if [ -d "$L4d2Dir/addons/sourcemod" ]; then
+    IsSourceModInstalled=true
+fi
+
 if [ ! -d "$L4d2Dir" ]; then
     echo -e "${C_CYAN}提示: 未找到求生之路2服务器的游戏目录 ($L4d2Dir)。${C_RESET}"
     echo -e "您可以稍后使用菜单中的 [部署服务器] 功能进行安装。"
     echo -e "配置的服务器安装目录: $ServerRoot"
     read -p "按回车键继续..."
-fi
-
-if [ -f "$L4d2Dir/addons/sourcemod/bin/sourcemod_mm.so" ]; then
-    IsSourceModInstalled=true
 fi
 
 mkdir -p "$InstallerDir" "$PluginSourceDir" "$ReceiptsDir"
@@ -107,8 +108,11 @@ function Show-InteractiveMenu {
     }
 
     while true; do
-        clear
-        echo -e "${C_YELLOW}$title${C_RESET}\n"
+        # --- FIXED ---
+        # All visual output is now redirected to stderr (>&2) to not pollute stdout,
+        # which is used by command substitution to get the return value.
+        clear >&2
+        echo -e "${C_YELLOW}$title${C_RESET}\n" >&2
         for i in "${!items[@]}"; do
             local pointer="  "
             local display_item="${items[$i]}"
@@ -122,22 +126,22 @@ function Show-InteractiveMenu {
             fi
 
             if [[ $i -eq $current_index ]]; then
-                echo -e "${C_WHITE_BG}${C_BLACK_FG}$pointer$display_item${C_RESET}"
+                echo -e "${C_WHITE_BG}${C_BLACK_FG}$pointer$display_item${C_RESET}" >&2
             else
-                echo -e "$pointer$display_item"
+                echo -e "$pointer$display_item" >&2
             fi
         done
 
-        echo ""
-        echo "-----------------------------------------------------------------"
-        echo "  导航:        ↑ / ↓"
+        echo "" >&2
+        echo "-----------------------------------------------------------------" >&2
+        echo "  导航:        ↑ / ↓" >&2
         if [[ "$selection_mode" == "multi" ]]; then
-            echo "  选择/取消:   空格键 (Spacebar)"
-            echo "  全选/反选:   A"
+            echo "  选择/取消:   空格键 (Spacebar)" >&2
+            echo "  全选/反选:   A" >&2
         fi
-        echo "  确认操作:    $confirm_key_name (${confirm_key_char^^}) 或 Enter"
-        echo "  返回:        Q"
-        echo "-----------------------------------------------------------------"
+        echo "  确认操作:    $confirm_key_name (${confirm_key_char^^}) 或 Enter" >&2
+        echo "  返回:        Q" >&2
+        echo "-----------------------------------------------------------------" >&2
 
         IFS= read -rsn1 key
         # Arrow keys are multi-byte sequences
@@ -176,16 +180,14 @@ function Show-InteractiveMenu {
                  fi
                 ;;
             'q'|'Q') # Quit
-                # To return an empty array, we echo nothing. The caller checks for empty string.
                 return 1 
                 ;;
             ''|$'\n'|"$confirm_key_char") # Enter or Confirm Key
+                # This part correctly writes to stdout to be captured.
                 if [[ "$selection_mode" == "single" ]]; then
-                    # Return the single selected item's text
                     echo "${items[$current_index]}"
                     return 0
                 else
-                    # Return a newline-separated list of selected items
                     for i in "${selected_indices[@]}"; do
                         echo "${items[$i]}"
                     done
@@ -301,7 +303,6 @@ function Deploy-L4D2Server {
 
     mkdir -p "$ServerRoot"
 
-    # --- MODIFIED SECTION for Login ---
     local login_credential="anonymous"
     if [[ -n "$SteamLoginUser" ]]; then
         login_credential="$SteamLoginUser"
@@ -320,7 +321,6 @@ function Deploy-L4D2Server {
     if [[ "$login_credential" != "anonymous" ]]; then
          echo -e "${C_YELLOW}注意: SteamCMD 即将运行。请准备在下方窗口输入您的密码和 Steam 令牌。${C_RESET}"
     fi
-    # --- END MODIFIED SECTION ---
 
     echo -e "\n准备就绪，即将开始执行 SteamCMD..."
     read -p "按回车键开始部署..."
@@ -652,10 +652,13 @@ function Install-SourceModAndMetaMod {
         echo "正在解压到服务器目录..."
         if tar -xzf "$metamod_tar" -C "$L4d2Dir"; then
             echo -e "${C_GREEN}解压完成。${C_RESET}"
+            
+            local vdf_path="$L4d2Dir/addons/metamod.vdf"
             echo "正在创建 'metamod.vdf' 以引导服务器加载..."
-            # Using -e to interpret the escape sequences
-            echo -e "\"Plugin\"\n{\n\t\"file\"\t\"addons/metamod/bin/server\"\n}" > "$L4d2Dir/metamod.vdf"
+            mkdir -p "$(dirname "$vdf_path")"
+            echo -e "\"Plugin\"\n{\n\t\"file\"\t\"addons/metamod/bin/server\"\n}" > "$vdf_path"
             echo -e "${C_GREEN}'metamod.vdf' 创建成功!${C_RESET}\n"
+
         else
             echo -e "${C_RED}解压 MetaMod 时出错。${C_RESET}\n"
         fi
@@ -680,8 +683,8 @@ function Install-SourceModAndMetaMod {
     echo " 请重启您的L4D2服务器以应用所有更改。"
     echo " 重启后, 您可以重新运行此脚本来管理插件。"
     echo "======================================================="
-
-    if [ -f "$L4d2Dir/addons/sourcemod/bin/sourcemod_mm.so" ]; then 
+    
+    if [ -d "$L4d2Dir/addons/sourcemod" ]; then 
         IsSourceModInstalled=true 
     fi
     read -p "按回车键返回主菜单..."
@@ -759,13 +762,15 @@ function Show-Menu {
     echo ""
     echo " 服务器安装目录: $ServerRoot"
 
+    # --- FIXED ---
+    # Re-added the server installation status check
     if [ -f "$ServerRoot/srcds_run" ]; then
         echo -e " ${C_GREEN}服务器状态: 已部署${C_RESET}"
     else
         echo -e " ${C_YELLOW}服务器状态: 未部署${C_RESET}"
     fi
 
-    if [ -f "$L4d2Dir/addons/sourcemod/bin/sourcemod_mm.so" ]; then
+    if [ -d "$L4d2Dir/addons/sourcemod" ]; then
         IsSourceModInstalled=true
         echo -e " ${C_GREEN}SourceMod 状态: 已安装${C_RESET}"
     else
