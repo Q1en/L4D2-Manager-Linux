@@ -72,7 +72,7 @@ C_WHITE_BG='\e[47m'
 C_BLACK_FG='\e[30m'
 
 # --- 初始化检查 ---
-if [ -d "$L4d2Dir/addons/sourcemod" ]; then
+if [ -f "$L4d2Dir/addons/metamod.vdf" ] && [ -f "$L4d2Dir/addons/sourcemod/bin/sourcemod_mm_i486.so" ]; then
     IsSourceModInstalled=true
 fi
 
@@ -199,7 +199,11 @@ function Invoke-PluginInstallation {
     echo -e "\n--- 开始安装 '$pluginName' ---"
     
     echo " > 正在创建文件清单..."
-    (cd "$pluginPath" && find . -type f | sed 's|^\./||') > "$receiptPath"
+    if ! (cd "$pluginPath" && find . -type f | sed 's|^\./||') > "$receiptPath"; then
+        echo -e "   ${C_RED}错误! 创建插件清单 '$receiptPath' 失败。${C_RESET}"
+        rm -f "$receiptPath"
+        return 1
+    fi
     
     echo " > 正在将文件复制到服务器目录..."
     rsync -a "$pluginPath/" "$ServerRoot/"
@@ -217,10 +221,17 @@ function Invoke-PluginUninstallation {
     local receiptPath="$ReceiptsDir/$pluginName.receipt"
     echo -e "\n--- 开始移除 '$pluginName' ---"
     
+    if [ ! -f "$receiptPath" ]; then
+        echo -e "   ${C_RED}错误: 找不到插件清单文件 '$receiptPath'。无法继续卸载。${C_RESET}"
+        return 1
+    fi
+
     local pluginReclaimFolder="$PluginSourceDir/$pluginName"
     mkdir -p "$pluginReclaimFolder"
     
     while IFS= read -r relativePath || [[ -n "$relativePath" ]]; do
+        if [ -z "$relativePath" ]; then continue; fi
+
         local serverFile="$ServerRoot/$relativePath"
         local destinationFile="$pluginReclaimFolder/$relativePath"
         
@@ -230,8 +241,12 @@ function Invoke-PluginUninstallation {
         fi
     done < "$receiptPath"
     
-    while IFS= read -r relativePath || [[ -n "$relativePath" ]]; do
-        local dirOnServer="$ServerRoot/$(dirname "$relativePath")"
+    while IFS= read -r relativePath; do
+        if [ -z "$relativePath" ]; then continue; fi
+
+        local dirOnServer
+        dirOnServer="$ServerRoot/$(dirname "$relativePath")"
+        
         if [ -d "$dirOnServer" ] && [ -z "$(ls -A "$dirOnServer")" ]; then
             rmdir "$dirOnServer" 2>/dev/null
         fi
@@ -245,7 +260,9 @@ function Invoke-PluginUninstallation {
 function Update-RunningProcessList {
     local instances_to_remove=()
     for instance_name in "${!RunningProcesses[@]}"; do
-        local session_name=$(echo "${RunningProcesses[$instance_name]}" | cut -d'|' -f1)
+        local session_name
+        session_name=$(echo "${RunningProcesses[$instance_name]}" | cut -d'|' -f1)
+        
         if ! screen -ls | grep -q "\.$session_name"; then
             instances_to_remove+=("$instance_name")
         fi
@@ -333,8 +350,9 @@ function Manage-ServerInstances {
             echo "  (无)"
         else
             for name in "${!RunningProcesses[@]}"; do
-                local session_name=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f1)
-                local port=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f2)
+                local session_name port
+                session_name=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f1)
+                port=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f2)
                 echo -e "  - ${C_GREEN}$name (端口: $port, 会话: $session_name)${C_RESET}"
             done
         fi
@@ -377,7 +395,7 @@ function Start-L4D2ServerInstance {
 
     local selected_str
     selected_str=$(Show-InteractiveMenu "请选择要启动的服务器实例配置" instanceOptions "single" "s" "启动")
-    if [ -z "$selected_str" ]; then return; fi
+    if [ $? -ne 0 ] || [ -z "$selected_str" ]; then return; fi
 
     local Port HostName MaxPlayers StartMap ExtraParams Name
     if [[ "$selected_str" == "手动配置新实例" ]]; then
@@ -389,7 +407,8 @@ function Start-L4D2ServerInstance {
         read -p "请输入其他启动参数 (可留空): " ExtraParams
         Name="手动实例_port$Port"
     else
-        local instanceName=$(echo "$selected_str" | awk '{print $1}')
+        local instanceName
+        instanceName=$(echo "$selected_str" | awk '{print $1}')
         eval "${ServerInstances[$instanceName]}"
         Name="$instanceName"
     fi
@@ -431,16 +450,18 @@ function Stop-L4D2ServerInstance {
     
     local -a runningNames
     for name in "${!RunningProcesses[@]}"; do
-        local session_name=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f1)
+        local session_name
+        session_name=$(echo "${RunningProcesses[$name]}" | cut -d'|' -f1)
         runningNames+=("$name (会话: $session_name)")
     done
 
     local selected_str
     selected_str=$(Show-InteractiveMenu "请选择要关闭的服务器实例" runningNames "single" "k" "关闭")
-    if [ -z "$selected_str" ]; then return; fi
+    if [ $? -ne 0 ] || [ -z "$selected_str" ]; then return; fi
     
-    local instanceNameToStop=$(echo "$selected_str" | awk '{print $1}')
-    local sessionToStop=$(echo "${RunningProcesses[$instanceNameToStop]}" | cut -d'|' -f1)
+    local instanceNameToStop sessionToStop
+    instanceNameToStop=$(echo "$selected_str" | awk '{print $1}')
+    sessionToStop=$(echo "${RunningProcesses[$instanceNameToStop]}" | cut -d'|' -f1)
 
     echo -n "正在向会话 '$sessionToStop' 发送 quit 指令..."
     screen -S "$sessionToStop" -X stuff $'quit\n'
@@ -455,7 +476,6 @@ function Stop-L4D2ServerInstance {
     read -p "按回车键返回..."
 }
 
-# --- 定时任务管理 (已更新) ---
 function Manage-ScheduledTasks {
     if ! command -v screen &> /dev/null; then
         echo -e "\n${C_RED}错误: 定时任务功能依赖 'screen'。${C_RESET}"
@@ -471,16 +491,17 @@ function Manage-ScheduledTasks {
         echo -e "\n现有任务:"
         
         local existing_tasks
-        existing_tasks=$(crontab -l 2>/dev/null | grep "# $CronJobPrefix")
+        existing_tasks=$(crontab -l 2>/dev/null | grep --color=never "# $CronJobPrefix")
         
         if [ -n "$existing_tasks" ]; then
             while IFS= read -r task; do
-                local comment=$(echo "$task" | sed "s/.*# //")
-                local name=$(echo "$comment" | cut -d'_' -f3)
-                local session_name="l4d2_manager_${name}"
-                local time_spec=$(echo "$task" | awk '{print $2 ":" $1}')
+                local comment name
+                comment=$(echo "$task" | sed "s/.*# //")
+                name=$(echo "$comment" | cut -d'_' -f3)
 
+                local session_name="l4d2_manager_${name}"
                 local status_text status_color
+
                 if screen -ls | grep -q "\.$session_name"; then
                     status_text="运行中"
                     status_color=$C_CYAN
@@ -489,7 +510,9 @@ function Manage-ScheduledTasks {
                     status_color=$C_RED
                 fi
                 
-                echo -e "[服务: ${status_color}${status_text}${C_RESET}] - $comment | 触发器: 每天 $time_spec"
+                local cron_time
+                cron_time=$(echo "$task" | awk '{printf "%02d:%02d", $2, $1}')
+                echo -e "[服务: ${status_color}${status_text}${C_RESET}] - $comment | 触发器: 每天 $cron_time"
             done <<< "$existing_tasks"
         else
             echo "  (未找到由本工具创建的定时任务)"
@@ -525,13 +548,13 @@ function New-ServerScheduledTask {
 
     local selectedInstanceName
     selectedInstanceName=$(Show-InteractiveMenu "请选择要为其创建定时 [${actionTypeDisplay}] 任务的实例" instanceOptions "single" "c" "选择")
-    if [ -z "$selectedInstanceName" ]; then return; fi
+    if [ $? -ne 0 ] || [ -z "$selectedInstanceName" ]; then return; fi
 
     eval "${ServerInstances[$selectedInstanceName]}"
 
     local time regex="^([01]?[0-9]|2[0-3]):[0-5][0-9]$"
     while true; do
-        read -p $"\n请输入每天定时${actionTypeDisplay}的时间 (24小时制, 格式 HH:mm, 例如 22:30): " time
+        read -p $'\n请输入每天定时${actionTypeDisplay}的时间 (24小时制, 格式 HH:mm, 例如 22:30): ' time
         if [[ $time =~ $regex ]]; then
             break
         else
@@ -539,15 +562,18 @@ function New-ServerScheduledTask {
         fi
     done
 
-    local minute=$((10#$(echo "$time" | cut -d: -f2)))
-    local hour=$((10#$(echo "$time" | cut -d: -f1)))
+    local minute_str hour_str
+    minute_str=$(echo "$time" | cut -d: -f2)
+    hour_str=$(echo "$time" | cut -d: -f1)
+    local minute=$((10#minute_str))
+    local hour=$((10#hour_str))
+
     local session_name="l4d2_manager_${selectedInstanceName}"
     local taskComment="$CronJobPrefix_${actionType}_${selectedInstanceName}_Port${Port}"
     local command_to_run
 
     if [[ "$actionType" == "Start" ]]; then
         local srcdsArgs="-console -game left4dead2 -insecure +sv_lan 0 +ip 0.0.0.0 -port $Port +maxplayers $MaxPlayers +map $StartMap +hostname \"$HostName\" $ExtraParams"
-        # For crontab, we must provide full paths and ensure proper context.
         command_to_run="cd '$ServerRoot' && /usr/bin/screen -dmS '$session_name' ./srcds_run $srcdsArgs"
     else # Stop
         command_to_run="/usr/bin/screen -S '$session_name' -X stuff $'quit\\n'"
@@ -565,10 +591,13 @@ function New-ServerScheduledTask {
     local current_crontab
     current_crontab=$(crontab -l 2>/dev/null | grep -v "# $taskComment")
     
-    # Using a temporary file is safer than redirecting directly
-    local temp_cron_file=$(mktemp)
+    local temp_cron_file
+    temp_cron_file=$(mktemp)
+    if [ $? -ne 0 ]; then
+        echo -e "${C_RED}错误: 无法创建临时文件。${C_RESET}"; read -p "按回车键返回..."; return
+    fi
+    
     echo "$current_crontab" > "$temp_cron_file"
-    # Add a newline if the file is not empty and doesn't end with one
     if [ -s "$temp_cron_file" ] && [[ $(tail -c 1 "$temp_cron_file") != '' ]]; then
         echo >> "$temp_cron_file"
     fi
@@ -586,13 +615,17 @@ function View-DeleteScheduledTasks {
         echo -e "${C_YELLOW}==================== 查看并删除定时任务 ====================${C_RESET}"
         
         local -a taskDisplayList
-        while IFS= read -r task; do
-            if [[ -n "$task" ]]; then
-                local comment=$(echo "$task" | sed "s/.*# //")
-                local time_spec=$(echo "$task" | awk '{print $2 ":" $1}')
-                taskDisplayList+=("$comment | 触发器: 每天 $time_spec")
-            fi
-        done < <(crontab -l 2>/dev/null | grep "# $CronJobPrefix")
+        local task_list
+        task_list=$(crontab -l 2>/dev/null | grep --color=never "# $CronJobPrefix")
+        
+        if [ -n "$task_list" ]; then
+            while IFS= read -r task; do
+                local comment cron_time
+                comment=$(echo "$task" | sed "s/.*# //")
+                cron_time=$(echo "$task" | awk '{printf "%02d:%02d", $2, $1}')
+                taskDisplayList+=("$comment | 触发器: 每天 $cron_time")
+            done <<< "$task_list"
+        fi
 
         if [ ${#taskDisplayList[@]} -eq 0 ]; then
             echo -e "\n没有找到由本工具创建的定时任务。"
@@ -602,17 +635,19 @@ function View-DeleteScheduledTasks {
         
         local selected_output
         selected_output=$(Show-InteractiveMenu "请选择要删除的定时任务 (可多选)" taskDisplayList "multi" "d" "删除")
-        if [ -z "$selected_output" ]; then return; fi
+        if [ $? -ne 0 ] || [ -z "$selected_output" ]; then return; fi
         
         local -a selectedToDelete
         mapfile -t selectedToDelete <<< "$selected_output"
 
         clear
         echo "--- 开始删除任务 ---"
-        local crontab_content=$(crontab -l 2>/dev/null)
+        local crontab_content
+        crontab_content=$(crontab -l 2>/dev/null)
 
         for item in "${selectedToDelete[@]}"; do
-            local taskCommentToDelete=$(echo "$item" | cut -d'|' -f1 | sed 's/ *$//g')
+            local taskCommentToDelete
+            taskCommentToDelete=$(echo "$item" | cut -d'|' -f1 | sed 's/ *$//g')
             echo -n "正在删除任务: '$taskCommentToDelete'..."
             crontab_content=$(echo "$crontab_content" | grep -v "# $taskCommentToDelete")
             echo -e "${C_GREEN}  成功!${C_RESET}"
@@ -645,7 +680,8 @@ function Install-SourceModAndMetaMod {
     echo -e "2. 将下载的 .tar.gz 文件放入以下目录: \n   $InstallerDir"
     read -p $'\n准备就绪后，按回车键开始安装...' ; echo ""
 
-    local metamod_tar=$(find "$InstallerDir" -maxdepth 1 -name "mmsource-*.tar.gz" | sort -V | tail -n 1)
+    local metamod_tar
+    metamod_tar=$(find "$InstallerDir" -maxdepth 1 -name "mmsource-*.tar.gz" | sort -V | tail -n 1)
     if [ -n "$metamod_tar" ]; then
         echo "发现 MetaMod 安装包: $(basename "$metamod_tar")"
         echo "正在解压到服务器目录..."
@@ -665,7 +701,8 @@ function Install-SourceModAndMetaMod {
         echo -e "${C_YELLOW}警告: 在 '$InstallerDir' 中未找到 MetaMod 的 .tar.gz 安装包。${C_RESET}\n"
     fi
     
-    local sourcemod_tar=$(find "$InstallerDir" -maxdepth 1 -name "sourcemod-*.tar.gz" | sort -V | tail -n 1)
+    local sourcemod_tar
+    sourcemod_tar=$(find "$InstallerDir" -maxdepth 1 -name "sourcemod-*.tar.gz" | sort -V | tail -n 1)
     if [ -n "$sourcemod_tar" ]; then
         echo "发现 SourceMod 安装包: $(basename "$sourcemod_tar")"
         echo "正在解压到服务器目录..."
@@ -683,7 +720,7 @@ function Install-SourceModAndMetaMod {
     echo " 重启后, 您可以重新运行此脚本来管理插件。"
     echo "======================================================="
     
-    if [ -d "$L4d2Dir/addons/sourcemod" ]; then 
+    if [ -f "$L4d2Dir/addons/metamod.vdf" ] && [ -f "$L4d2Dir/addons/sourcemod/bin/sourcemod_mm_i486.so" ]; then
         IsSourceModInstalled=true 
     fi
     read -p "按回车键返回主菜单..."
@@ -697,7 +734,8 @@ function Install-L4D2Plugin {
     local -a availablePlugins
     for d in "$PluginSourceDir"/*/; do
         [ -d "$d" ] || continue
-        local dirname=$(basename "$d")
+        local dirname
+        dirname=$(basename "$d")
         if [ ! -f "$ReceiptsDir/$dirname.receipt" ]; then
             availablePlugins+=("$dirname")
         fi
@@ -709,10 +747,13 @@ function Install-L4D2Plugin {
     
     local selected_output
     selected_output=$(Show-InteractiveMenu "请选择要安装的插件" availablePlugins "multi" "i" "安装")
-    clear
-    if [ -z "$selected_output" ]; then 
-        echo "未选择任何插件或操作已取消。"; read -p "按回车键返回主菜单..."; return
+    if [ $? -ne 0 ]; then
+        clear; echo "操作已取消。"; read -p "按回车键返回主菜单..."; return
     fi
+    if [ -z "$selected_output" ]; then 
+        clear; echo "未选择任何插件。"; read -p "按回车键返回主菜单..."; return
+    fi
+    clear
 
     while IFS= read -r pluginName; do
         Invoke-PluginInstallation "$pluginName"
@@ -738,10 +779,13 @@ function Uninstall-L4D2Plugin {
 
     local selected_output
     selected_output=$(Show-InteractiveMenu "请选择要移除的插件" installedPlugins "multi" "r" "移除")
-    clear
-    if [ -z "$selected_output" ]; then
-        echo "未选择任何插件或操作已取消。"; read -p "按回车键返回主菜单..."; return
+    if [ $? -ne 0 ]; then
+        clear; echo "操作已取消。"; read -p "按回车键返回主菜单..."; return
     fi
+    if [ -z "$selected_output" ]; then
+        clear; echo "未选择任何插件。"; read -p "按回车键返回主菜单..."; return
+    fi
+    clear
 
     while IFS= read -r pluginName; do
         Invoke-PluginUninstallation "$pluginName"
@@ -765,11 +809,15 @@ function Show-Menu {
         echo -e " ${C_YELLOW}服务器状态: 未部署${C_RESET}"
     fi
 
-    if [ -d "$L4d2Dir/addons/sourcemod" ]; then
+    if [ -f "$L4d2Dir/addons/metamod.vdf" ] && [ -f "$L4d2Dir/addons/sourcemod/bin/sourcemod_mm_i486.so" ]; then
         IsSourceModInstalled=true
-        echo -e " ${C_GREEN}SourceMod 状态: 已安装${C_RESET}"
     else
         IsSourceModInstalled=false
+    fi
+
+    if $IsSourceModInstalled; then
+        echo -e " ${C_GREEN}SourceMod 状态: 已安装${C_RESET}"
+    else
         echo -e " ${C_YELLOW}SourceMod 状态: 未找到!${C_RESET}"
     fi
 
@@ -802,7 +850,7 @@ while true; do
             if [ ${#RunningProcesses[@]} -gt 0 ]; then
                 echo -e "\n${C_YELLOW}警告: 有 ${#RunningProcesses[@]} 个服务器实例仍在运行。${C_RESET}"
                 read -p "退出脚本不会关闭这些服务器。确认退出吗? (y/n): " confirm
-                if [[ "$confirm" != "y" ]]; then
+                if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
                     continue
                 fi
             fi
