@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =================================================================
-# L4D2 服务器与插件管理器 2607 - Polaris
+# L4D2 服务器与插件管理器 2627 - Polaris
 # 作者: Q1en, 20Cat
 # 功能: 部署/更新L4D2服务器, 安装/更新 SourceMod & MetaMod, 并管理插件、服务器实例。
 # =================================================================
@@ -58,7 +58,7 @@ InstallerDir="$ScriptDir/SourceMod_Installers"
 PluginSourceDir="$ScriptDir/Available_Plugins"
 ReceiptsDir="$ScriptDir/Installed_Receipts"
 declare -A RunningProcesses # [InstanceName]="session_name|Port"
-ScriptVersion="2607 - Polaris"
+ScriptVersion="2627 - Polaris"
 IsSourceModInstalled=false
 CronJobPrefix="L4D2Manager"
 
@@ -277,6 +277,36 @@ function Update-RunningProcessList {
     fi
 }
 
+function Discover-RunningInstances {
+    RunningProcesses=()
+
+    while IFS= read -r line; do
+        if [[ -z "$line" ]]; then continue; fi
+
+        local session_name
+        session_name=$(echo "$line" | awk '{print $1}' | cut -d'.' -f2-)
+        if [ -z "$session_name" ]; then continue; fi
+
+        local instance_name
+        instance_name=${session_name#l4d2_manager_}
+        
+        local Port=""
+
+        if [[ -v "ServerInstances[$instance_name]" ]]; then
+            eval "${ServerInstances[$instance_name]}"
+        elif [[ "$instance_name" == 手动实例_port* ]]; then
+            Port=${instance_name#手动实例_port}
+        else
+            continue
+        fi
+        
+        if [[ -n "$Port" ]]; then
+            RunningProcesses["$instance_name"]="$session_name|$Port"
+        fi
+    done < <(screen -ls | grep --color=never "\.l4d2_manager_")
+}
+
+
 # --- 核心功能函数 ---
 
 function Deploy-L4D2Server {
@@ -419,18 +449,12 @@ function Start-L4D2ServerInstance {
         read -p "按回车键返回..."; return
     fi
 
-    local -a launchArgsArray=(
-        "$srcds_path" -console -game left4dead2 -insecure +sv_lan 0 +ip 0.0.0.0
-        -port "$Port" +maxplayers "$MaxPlayers" +map "$StartMap" +hostname "$HostName"
-    )
-    read -r -a extraArgs <<< "$ExtraParams"
-    launchArgsArray+=("${extraArgs[@]}")
+    local srcdsArgs="-console -game left4dead2 -port $Port +maxplayers $MaxPlayers +map $StartMap +hostname \"$HostName\" $ExtraParams"
 
     echo -e "\n${C_CYAN}即将在 Screen 会话 '$session_name' 中启动服务器:${C_RESET}"
-    printf " %q" "${launchArgsArray[@]}"
-    echo
+    echo " $srcds_path $srcdsArgs"
     
-    (cd "$ServerRoot" && screen -dmS "$session_name" "${launchArgsArray[@]}")
+    (cd "$ServerRoot" && screen -dmS "$session_name" $srcds_path $srcdsArgs)
     
     sleep 1
 
@@ -573,7 +597,7 @@ function New-ServerScheduledTask {
     local command_to_run
 
     if [[ "$actionType" == "Start" ]]; then
-        local srcdsArgs="-console -game left4dead2 -insecure +sv_lan 0 +ip 0.0.0.0 -port $Port +maxplayers $MaxPlayers +map $StartMap +hostname \"$HostName\" $ExtraParams"
+        local srcdsArgs="-console -game left4dead2 -port $Port +maxplayers $MaxPlayers +map $StartMap +hostname \"$HostName\" $ExtraParams"
         command_to_run="cd '$ServerRoot' && /usr/bin/screen -dmS '$session_name' ./srcds_run $srcdsArgs"
     else # Stop
         command_to_run="/usr/bin/screen -S '$session_name' -X stuff $'quit\\n'"
@@ -715,7 +739,7 @@ function Install-SourceModAndMetaMod {
         echo -e "${C_YELLOW}警告: 在 '$InstallerDir' 中未找到 SourceMod 的 .tar.gz 安装包。${C_RESET}\n"
     fi
 
-    echo -e "${C_CYAN}=======================================================\n 安装流程执行完毕!${C_RESET}"
+    echo -e "=======================================================\n ${C_CYAN}安装流程执行完毕!${C_RESET}"
     echo " 请重启您的L4D2服务器以应用所有更改。"
     echo " 重启后, 您可以重新运行此脚本来管理插件。"
     echo "======================================================="
@@ -835,6 +859,8 @@ function Show-Menu {
     echo -e "\n   Q. 退出\n"
     echo "========================================================"
 }
+
+Discover-RunningInstances
 
 # 脚本主循环
 while true; do
